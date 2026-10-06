@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ func CheckUpdate(currentTag string) (err error) {
 			err = fmt.Errorf("%v", r)
 		}
 	}()
-	respJson, status, err := Request("https://api.github.com/repos/baconator696/Recu-Download/releases/latest", 2, nil, nil, "GET")
+	respJson, status, err := Request("[DEPRECATED-GITHUB-ULR]", 2, nil, nil, "GET")
 	if err != nil {
 		return
 	} else if status != 200 {
@@ -88,6 +89,82 @@ func Argparser(n int) string {
 		return os.Args[n]
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------
+// NEW: file moving helpers
+// ---------------------------------------------------------------------
+
+// Moves the file at src into destDir (destDir is created if needed, a blank
+// destDir means the working directory).
+// If a file with the same name already exists in destDir, "(1)", "(2)", ...
+// is added to the name instead of overwriting it.
+// Returns the final path of the moved file.
+//
+// os.Rename is instant when both folders are on the same drive, but it fails
+// when moving between drives on Windows (C: -> D:), so on failure this falls
+// back to copy + delete.
+func MoveFile(src, destDir string) (string, error) {
+	if destDir != "" {
+		err := os.MkdirAll(destDir, 0755)
+		if err != nil {
+			return "", fmt.Errorf("can not create folder %s: %v", destDir, err)
+		}
+	}
+	base := filepath.Base(src)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	dst := filepath.Join(destDir, base)
+	// find a free name in the destination folder
+	for i := 1; ; i++ {
+		_, err := os.Stat(dst)
+		if err != nil {
+			break
+		}
+		dst = filepath.Join(destDir, fmt.Sprintf("%s(%d)%s", name, i, ext))
+	}
+	// same drive: instant
+	if os.Rename(src, dst) == nil {
+		return dst, nil
+	}
+	// different drive: copy then delete the original
+	err := copyFile(src, dst)
+	if err != nil {
+		return "", err
+	}
+	err = os.Remove(src)
+	if err != nil {
+		return dst, fmt.Errorf("copied to %s but could not delete the original: %v", dst, err)
+	}
+	return dst, nil
+}
+
+// Copies src to dst. dst must not already exist.
+// A partially written dst is removed if anything goes wrong.
+func copyFile(src, dst string) (err error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cerr := out.Close()
+		if err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(dst)
+		}
+	}()
+	_, err = io.Copy(out, in)
+	if err != nil {
+		return err
+	}
+	return out.Sync()
 }
 
 // ANSI Color
