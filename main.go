@@ -1,13 +1,14 @@
 package main
 
 import (
+	"recurbate/config"
+	"recurbate/playlist"
+	"recurbate/tools"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
-	"recurbate/config"
-	"recurbate/playlist"
-	"recurbate/tools"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,6 +16,12 @@ import (
 )
 
 var tag string
+
+// NEW: writes the .m3u8 playlist into the "Playlist Directory"
+// (falls back to the unfinished folder, then the working directory)
+func savePlaylist(cfg config.Config, playList playlist.Playlist) error {
+	return os.WriteFile(filepath.Join(cfg.PlaylistDir(), playList.Filename+".m3u8"), playList.M3u8, 0666)
+}
 
 func parallelService(cfg config.Config) {
 	playlists := make([]playlist.Playlist, len(cfg.Urls))
@@ -32,7 +39,7 @@ func parallelService(cfg config.Config) {
 			if cfg.GetVideo(playList) == nil {
 				return
 			}
-			err := os.WriteFile(playList.Filename+".m3u8", playList.M3u8, 0666)
+			err := savePlaylist(cfg, playList)
 			if err != nil {
 				fmt.Println(playList.M3u8)
 				fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
@@ -73,7 +80,7 @@ func hybridService(cfg config.Config) {
 				if cfg.GetVideo(playList) == nil {
 					continue
 				}
-				err := os.WriteFile(playList.Filename+".m3u8", playList.M3u8, 0666)
+				err := savePlaylist(cfg, playList)
 				if err != nil {
 					fmt.Println(playList.M3u8)
 					fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
@@ -96,7 +103,7 @@ func serialService(cfg config.Config) {
 		if cfg.GetVideo(playList) == nil {
 			continue
 		}
-		err := os.WriteFile(playList.Filename+".m3u8", playList.M3u8, 0666)
+		err := savePlaylist(cfg, playList)
 		if err != nil {
 			fmt.Println(playList.M3u8)
 			fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
@@ -109,7 +116,7 @@ func downloadPlaylist(cfg config.Config) {
 		if playList.IsNil() {
 			continue
 		}
-		err := os.WriteFile(playList.Filename+".m3u8", playList.M3u8, 0666)
+		err := savePlaylist(cfg, playList)
 		if err != nil {
 			fmt.Println(playList.M3u8)
 			fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
@@ -140,7 +147,7 @@ func readme() string {
 		split := strings.Split(path, string(os.PathSeparator))
 		path = split[len(split)-1]
 	}
-	string1 := `Recurbate:
+	string1 := `recurbate:
 If ran for the first time, json configuration will be generated
 	in the working directory
 Fill in the json's URL, Cookie and User-Agent to allow the
@@ -155,7 +162,17 @@ if "playlist" is used, only the .m3u8 playlist file will be
 if "series" is used, the program will download all the videos
 	in series
 if "hybrid is used, the program will download sequentially from
-	each server but in parallel from different servers`
+	each server but in parallel from different servers
+
+Folders (set in the "options" part of the json, all optional):
+"Unfinished Directory" - downloads are written here while in progress
+	and stay here if the download is stopped or fails
+"Finished Directory"   - a download is moved here once it has fully
+	downloaded
+"Playlist Directory"   - .m3u8 files are saved here (defaults to the
+	unfinished folder)
+Blank means the working directory. Use / or \\ in paths,
+	e.g. "D:/Videos/Done"`
 	return string1 + path + string2
 }
 func init() {
@@ -171,7 +188,7 @@ func init() {
 	}()
 }
 func main() {
-	fmt.Printf("Recu %v\n", tag)
+	fmt.Printf("Recurbate Custom Downloader %v\n", tag)
 	tools.CheckUpdate(tag)
 	if tools.Argparser(1) == "--help" {
 		fmt.Println(readme())
@@ -197,6 +214,12 @@ func main() {
 	err = json.Unmarshal(jsonData, &cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Reading Json: %v", err)
+		os.Exit(4)
+	}
+	// NEW: create the unfinished / finished / playlist folders if they don't exist
+	err = cfg.EnsureDirs()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(4)
 	}
 	if cfg.Empty() {
