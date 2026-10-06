@@ -1,4 +1,4 @@
-### This was build using v1.12.4
+### This was built using v1.12.4
 
 Use `.\recu-custom-dir-windows-amd64.exe --help` for more information
 
