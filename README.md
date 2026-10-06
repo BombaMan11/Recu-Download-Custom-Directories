@@ -23,17 +23,8 @@ First run will generate `config.json`, fill in urls to download and Cookie and U
 }
 ```
 
-Usage: `recurbate <json location> playlist/series <playlist.m3u8>`
-
-`<json location>` is the location of the json
-
-specifying `playlist` will cause the program to download only the .m3u8 file
-
-specifying `series` will cause the program to download the videos serially instead of in parallel
-
-specifying `playlist <playlist.m3u8>` will read the playlist from the location specified from `<playlist.m3u8>` and download that video
 ### Advanced Usage for the Custom Directory in v1.0.0
-To specify a specific part of a video to download
+To specify a specific part of a video to download and location of video parts
 
 example:
 ```JSON
