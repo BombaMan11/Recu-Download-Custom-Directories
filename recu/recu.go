@@ -1,10 +1,11 @@
 package recu
 
 import (
-	"fmt"
-	"os"
 	"recurbate/playlist"
 	"recurbate/tools"
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -232,19 +233,28 @@ func regexResolutionMatch(text string) (int, error) {
 	return 0, fmt.Errorf("no match found")
 }
 
-// Muxes the transport streams and saves it to a file
-func Mux(playList playlist.Playlist, header map[string]string, startIndex int, durationPercent []float64) (failIndex int, err error) {
+// Muxes the transport streams and saves it to a file inside dir
+// (dir is the "Unfinished Directory", a blank dir means the working directory).
+//
+// Returns:
+//
+//	failIndex - the playlist line it stopped at (0 when the download finished)
+//	filename  - the final file name, without folder or ".ts". This can differ
+//	            from playList.Filename if a name collision added "(1)" etc.
+//	err       - nil only if the whole download finished
+func Mux(playList playlist.Playlist, header map[string]string, startIndex int, durationPercent []float64, dir string) (failIndex int, filename string, err error) {
 	var data []byte
 	var file *os.File
 	var avgdur, avgsize tools.AvgBuffer
+	filename = playList.Filename
 	if startIndex < 0 {
 		startIndex = 0
 	}
 	if tools.Abort {
-		return startIndex, fmt.Errorf("aborting")
+		return startIndex, filename, fmt.Errorf("aborting")
 	}
 	if durationPercent[0] > 100 || durationPercent[1] <= durationPercent[0] {
-		return startIndex, fmt.Errorf("duration format error")
+		return startIndex, filename, fmt.Errorf("duration format error")
 	}
 	if durationPercent[0] < 0 {
 		durationPercent[0] = 0
@@ -253,29 +263,30 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 		durationPercent[1] = 100
 	}
 	// checks if continuation of previous run
+	// (the partial file is looked for in the unfinished folder)
 	if startIndex != 0 {
-		file, err = os.OpenFile(playList.Filename+".ts", os.O_APPEND|os.O_WRONLY, 0666)
+		file, err = os.OpenFile(filepath.Join(dir, filename+".ts"), os.O_APPEND|os.O_WRONLY, 0666)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "original file not found, creating new one: %v", err)
 		}
 	}
 	// creates file
 	if file == nil {
-		// checks for filename collisions
-		_, err = os.Stat(playList.Filename + ".ts")
+		// checks for filename collisions inside the unfinished folder
+		_, err = os.Stat(filepath.Join(dir, filename+".ts"))
 		if err == nil {
 			for i := 1; i > 0; i++ {
-				new := fmt.Sprintf("%s(%d)", playList.Filename, i)
-				_, err := os.Stat(new + ".ts")
+				newName := fmt.Sprintf("%s(%d)", filename, i)
+				_, err := os.Stat(filepath.Join(dir, newName+".ts"))
 				if err != nil {
-					playList.Filename = new
+					filename = newName
 					break
 				}
 			}
 		}
-		file, err = os.OpenFile(playList.Filename+".ts", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0666)
+		file, err = os.OpenFile(filepath.Join(dir, filename+".ts"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0666)
 		if err != nil {
-			return startIndex, fmt.Errorf("can not create file: %v", err)
+			return startIndex, filename, fmt.Errorf("can not create file: %v", err)
 		}
 	}
 	defer file.Close()
@@ -288,20 +299,20 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 		i := i + startIndex
 		if tools.Abort {
 			fmt.Println()
-			return i, fmt.Errorf("aborting")
+			return i, filename, fmt.Errorf("aborting")
 		}
 		startTime := time.Now()
 		err := muxDownloadLoop(&data, tsLink, header, 10, 5)
 		if err != nil {
 			fmt.Println()
 			err = fmt.Errorf("error: %v\nFailed at %.2f%%", tools.ANSIColor(err, 2), float32(i)/float32(playList.Len())*100)
-			return i, err
+			return i, filename, err
 		}
 		endDur := time.Since(startTime).Minutes()
 		_, err = file.Write(data)
 		if err != nil {
 			err = fmt.Errorf("can not write file: %v", err)
-			return i, err
+			return i, filename, err
 		}
 		// Calculate User Interface Timings
 		avgsize.Add(float64(len(data)))
@@ -312,7 +323,7 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 		percent := float64(i) / float64(playList.Len()) * 100
 		fmt.Printf("\n\033[A\033[2KDownloading: %s\tRemaining: %s\t%s", tools.ANSIColor(fmt.Sprintf("%.1f%%", percent), 33), tools.FormatMinutes(eta), tools.FormatBytesPerSecond(speedSecs))
 	}
-	return 0, nil
+	return 0, filename, nil
 }
 
 // download retry loop for Mux()
