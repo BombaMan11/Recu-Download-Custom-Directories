@@ -1,3 +1,5 @@
+### This was build using v1.12.4
+
 Use `.\recu-custom-dir-windows-amd64.exe --help` for more information
 
 Run with `.\recu-custom-dir-windows-amd64.exe`
@@ -30,7 +32,7 @@ specifying `playlist` will cause the program to download only the .m3u8 file
 specifying `series` will cause the program to download the videos serially instead of in parallel
 
 specifying `playlist <playlist.m3u8>` will read the playlist from the location specified from `<playlist.m3u8>` and download that video
-### Advanced Usage for v1.11.0
+### Advanced Usage for the Custom Directory in v1.0.0
 To specify a specific part of a video to download
 
 example:
