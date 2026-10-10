@@ -4,11 +4,13 @@ import (
 	"recurbate/config"
 	"recurbate/playlist"
 	"recurbate/tools"
+	"recurbate/ui"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,11 +25,40 @@ func savePlaylist(cfg config.Config, playList playlist.Playlist) error {
 	return os.WriteFile(filepath.Join(cfg.PlaylistDir(), playList.Filename+".m3u8"), playList.M3u8, 0666)
 }
 
-func parallelService(cfg config.Config) {
+// NEW: writes the playlist and shows a failure in the error box
+func savePlaylistReport(cfg config.Config, playList playlist.Playlist) {
+	err := savePlaylist(cfg, playList)
+	if err != nil {
+		ui.Error(fmt.Sprintf("Failed to write playlist data: %v", err))
+	}
+}
+
+// NEW: gets the playlist of every url. Each one found is added to the
+// waiting list on the dashboard as soon as its name is known.
+func fetchPlaylists(cfg config.Config) []playlist.Playlist {
 	playlists := make([]playlist.Playlist, len(cfg.Urls))
 	for i, link := range cfg.Urls {
+		ui.Phase(fmt.Sprintf("Fetching playlists %d/%d", i+1, len(cfg.Urls)))
 		playlists[i] = cfg.GetPlaylist(link, i)
+		if !playlists[i].IsNil() {
+			ui.Queue(i, playlists[i].Filename)
+		}
 	}
+	ui.Phase("")
+	return playlists
+}
+
+// NEW: runs a service with the dashboard on screen (when the output is a
+// terminal), the dashboard is always closed again afterwards
+func runWithUI(cfg config.Config, run func()) {
+	if ui.Open(cfg.ASCIIMode()) {
+		defer ui.Close()
+	}
+	run()
+}
+
+func parallelService(cfg config.Config) {
+	playlists := fetchPlaylists(cfg)
 	var wg sync.WaitGroup
 	for _, playList := range playlists {
 		if playList.IsNil() {
@@ -39,11 +70,7 @@ func parallelService(cfg config.Config) {
 			if cfg.GetVideo(playList) == nil {
 				return
 			}
-			err := savePlaylist(cfg, playList)
-			if err != nil {
-				fmt.Println(playList.M3u8)
-				fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
-			}
+			savePlaylistReport(cfg, playList)
 		}(playList)
 		time.Sleep(time.Second)
 	}
@@ -51,16 +78,16 @@ func parallelService(cfg config.Config) {
 }
 
 func hybridService(cfg config.Config) {
-	playlists := make([]playlist.Playlist, len(cfg.Urls))
-	for i, link := range cfg.Urls {
-		playlists[i] = cfg.GetPlaylist(link, i)
-	}
+	playlists := fetchPlaylists(cfg)
 	servers := make(map[string][]playlist.Playlist)
 	// organize playlist by server
 	for _, playList := range playlists {
+		if playList.IsNil() {
+			continue // already finished, or its error was already shown
+		}
 		server, err := playList.PlaylistOrigin()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			ui.Error(err.Error())
 			continue
 		}
 		if servers[server] == nil {
@@ -80,56 +107,85 @@ func hybridService(cfg config.Config) {
 				if cfg.GetVideo(playList) == nil {
 					continue
 				}
-				err := savePlaylist(cfg, playList)
-				if err != nil {
-					fmt.Println(playList.M3u8)
-					fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
-				}
+				savePlaylistReport(cfg, playList)
 			}
 		}(playlists)
 	}
 	wg.Wait()
 }
-func serialService(cfg config.Config) {
-	playlists := make([]playlist.Playlist, len(cfg.Urls))
-	for i, link := range cfg.Urls {
-		playlists[i] = cfg.GetPlaylist(link, i)
+
+// NEW: Reads the optional number after "series" = how many files download at once.
+// Missing or invalid means 1 (one file at a time, same as before).
+func parseSeriesCount() int {
+	arg := tools.Argparser(3)
+	if arg == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 1 {
+		fmt.Fprintf(os.Stderr, "Invalid number of simultaneous downloads %q, using 1\n", arg)
+		return 1
+	}
+	return n
+}
+
+// NEW: Downloads the list with up to `workers` files at the same time
+func serialService(cfg config.Config, workers int) {
+	playlists := fetchPlaylists(cfg)
+	if workers > len(playlists) {
+		workers = len(playlists)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if tools.Abort {
+					continue // drain the queue without starting anything new
+				}
+				playList := playlists[i]
+				if cfg.GetVideo(playList) == nil {
+					continue
+				}
+				savePlaylistReport(cfg, playList)
+			}
+		}()
 	}
 	for i, playList := range playlists {
 		if playList.IsNil() {
 			continue
 		}
-		fmt.Printf("%d/%d:\n", i+1, len(playlists))
-		if cfg.GetVideo(playList) == nil {
-			continue
+		if tools.Abort {
+			break
 		}
-		err := savePlaylist(cfg, playList)
-		if err != nil {
-			fmt.Println(playList.M3u8)
-			fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
-		}
+		jobs <- i
 	}
+	close(jobs)
+	wg.Wait()
 }
+
 func downloadPlaylist(cfg config.Config) {
 	for i, v := range cfg.Urls {
+		ui.Phase(fmt.Sprintf("Fetching playlist %d/%d", i+1, len(cfg.Urls)))
 		playList := cfg.GetPlaylist(v, i)
 		if playList.IsNil() {
 			continue
 		}
 		err := savePlaylist(cfg, playList)
 		if err != nil {
-			fmt.Println(playList.M3u8)
-			fmt.Fprintf(os.Stderr, "Failed to write playlist data: %v\n", err)
+			ui.Error(fmt.Sprintf("Failed to write playlist data: %v", err))
 			continue
 		}
-		fmt.Printf("Completed: %v:%v\n", playList.Filename, v)
+		ui.Logf("Completed: %v:%v", playList.Filename, v)
 	}
 }
 func downloadConent(cfg config.Config) {
 	playlistPath := tools.Argparser(3)
 	data, err := os.ReadFile(playlistPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read playlist: %v\n", err)
+		ui.Error(fmt.Sprintf("Failed to read playlist: %v", err))
 		return
 	}
 	filename := playlistPath
@@ -154,15 +210,21 @@ Fill in the json's URL, Cookie and User-Agent to allow the
 	program to run
 
 Usage: `
-	string2 := ` <json location> playlist|series <playlist.m3u8>
+	string2 := ` <json location> playlist|series|hybrid [N | playlist.m3u8]
 
 if "playlist" is used, only the .m3u8 playlist file will be
 	downloaded, specifiying the playlist location will
 	download the contents of the playlist
 if "series" is used, the program will download all the videos
-	in series
+	in the list. An optional number sets how many download at the
+	same time (e.g. "series 4"), default is 1
 if "hybrid is used, the program will download sequentially from
 	each server but in parallel from different servers
+
+Dashboard: while downloading, the screen shows the active downloads,
+	the waiting ones, the finished ones and the errors. Set
+	"ASCII Interface" to "true" in the "options" part of the json if the
+	console shows the boxes or the bar as "?"
 
 Folders (set in the "options" part of the json, all optional):
 "Unfinished Directory" - downloads are written here while in progress
@@ -184,11 +246,12 @@ func init() {
 		force := make(chan os.Signal, 1)
 		signal.Notify(force, os.Interrupt, syscall.SIGTERM)
 		<-force
+		ui.Close() // give the normal screen back
 		os.Exit(0)
 	}()
 }
 func main() {
-	fmt.Printf("Recurbate Custom Downloader %v\n", tag)
+	fmt.Printf("recurbate Custom Downloader %v\n", tag)
 	tools.CheckUpdate(tag)
 	if tools.Argparser(1) == "--help" {
 		fmt.Println(readme())
@@ -236,14 +299,15 @@ func main() {
 				fmt.Println(err)
 				os.Exit(4)
 			}
-			downloadConent(cfg)
+			runWithUI(cfg, func() { downloadConent(cfg) })
 		} else {
 			downloadPlaylist(cfg)
 		}
 	case "series":
-		serialService(cfg)
+		workers := parseSeriesCount() // read before the dashboard starts, it can print a warning
+		runWithUI(cfg, func() { serialService(cfg, workers) })
 	case "hybrid":
-		hybridService(cfg)
+		runWithUI(cfg, func() { hybridService(cfg) })
 	case "parse":
 		err := cfg.ParseHtml(tools.Argparser(3))
 		if err != nil {
@@ -252,6 +316,6 @@ func main() {
 			fmt.Println("Parsed HTML Successfully")
 		}
 	default:
-		parallelService(cfg)
+		runWithUI(cfg, func() { parallelService(cfg) })
 	}
 }
