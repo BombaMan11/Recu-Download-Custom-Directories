@@ -3,6 +3,7 @@ package recu
 import (
 	"recurbate/playlist"
 	"recurbate/tools"
+	"recurbate/ui"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,7 +53,7 @@ func parseDownloadLoop(url string, timeout int, header map[string]string) (data 
 		if err == nil && status == 200 {
 			break
 		}
-		fmt.Printf("Failed Retrying...\033[18D")
+		ui.Phase("Request failed, retrying...")
 		if retry > 5 {
 			if err == nil {
 				err = fmt.Errorf("%s, status code: %d", tools.ANSIColor(string(data), 2), status)
@@ -69,14 +70,12 @@ func parseDownloadLoop(url string, timeout int, header map[string]string) (data 
 // Takes recurbate video URL and returns playlist raw data and returns file name {ts-urls, filename, "done", error}
 func Parse(siteUrl string, header map[string]string, jsonLoc, maxRes int) (playList playlist.Playlist, errorType string, err error) {
 	// getting webpage
-	fmt.Printf("\rDownloading HTML: ")
 	htmldata, err := parseDownloadLoop(siteUrl, 10, tools.FormatedHeader(header, "", 1))
 	if err != nil {
 		errorType = "cloudflare"
 		return
 	}
 	html := string(htmldata)
-	fmt.Printf("\r\033[2KDownloading HTML: Complete\n")
 	// determine video ID
 	id, err := regexVideoIDMatch(siteUrl)
 	if err != nil {
@@ -92,7 +91,6 @@ func Parse(siteUrl string, header map[string]string, jsonLoc, maxRes int) (playL
 	// parse api url
 	apiUrl := strings.Join(strings.Split(siteUrl, "/")[:3], "/") + "/api/video/" + id + "?token=" + token
 	// request api
-	fmt.Printf("\rGetting Link to Playlist: ")
 	apidata, err := parseDownloadLoop(apiUrl, 10, tools.FormatedHeader(header, siteUrl, 2))
 	if err != nil {
 		errorType = "panic"
@@ -100,7 +98,6 @@ func Parse(siteUrl string, header map[string]string, jsonLoc, maxRes int) (playL
 	}
 	api := string(apidata)
 	// continue based on response from api
-	fmt.Printf("\r\033[2KGetting Link to Playlist: Complete\n")
 	switch api {
 	case "shall_subscribe":
 		errorType = "wait"
@@ -120,14 +117,12 @@ func Parse(siteUrl string, header map[string]string, jsonLoc, maxRes int) (playL
 		return
 	}
 	playlistUrl = strings.ReplaceAll(playlistUrl, "amp;", "")
-	fmt.Printf("\rDownloading Playlists: ")
 	// get m3u8 playlist
 	playlistData, err := parseDownloadLoop(playlistUrl, 10, tools.FormatedHeader(header, "", 0))
 	if err != nil {
 		errorType = "panic"
 		return
 	}
-	fmt.Printf("\r\033[2KDownloading Playlists: Complete\n")
 	// determine url prefix for playlist entries
 	prefix := playlistUrl[:strings.LastIndex(playlistUrl, "/")+1]
 	// if playlist contains resolution selection
@@ -167,16 +162,14 @@ func resolution(playlistData []byte, prefix string, header map[string]string, ma
 			}
 		}
 		if playlistUrl == "" {
-			println("The given Max Resolution isn't available, using maximum")
+			ui.Error("The given Max Resolution isn't available, using maximum")
 			playlistUrl = resolutions[6969]
 		}
-		fmt.Printf("\rDownloading Playlist: ")
 		var err error
 		playlistData, err = parseDownloadLoop(playlistUrl, 10, tools.FormatedHeader(header, "", 0))
 		if err != nil {
 			return nil, err
 		}
-		fmt.Printf("\r\033[2KDownloading Playlist: Complete\n")
 	}
 	return playlistData, nil
 }
@@ -235,6 +228,7 @@ func regexResolutionMatch(text string) (int, error) {
 
 // Muxes the transport streams and saves it to a file inside dir
 // (dir is the "Unfinished Directory", a blank dir means the working directory).
+// Progress is reported to the dashboard (ui package), nothing is printed here.
 //
 // Returns:
 //
@@ -246,6 +240,7 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 	var data []byte
 	var file *os.File
 	var avgdur, avgsize tools.AvgBuffer
+	id := playList.JsonLoc
 	filename = playList.Filename
 	if startIndex < 0 {
 		startIndex = 0
@@ -267,7 +262,7 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 	if startIndex != 0 {
 		file, err = os.OpenFile(filepath.Join(dir, filename+".ts"), os.O_APPEND|os.O_WRONLY, 0666)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "original file not found, creating new one: %v", err)
+			ui.Error(fmt.Sprintf("original file not found, creating new one: %v", err))
 		}
 	}
 	// creates file
@@ -290,21 +285,23 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 		}
 	}
 	defer file.Close()
+	// the file name is final now, show it on the dashboard
+	ui.Begin(id, filename)
 	// muxing loop //
+	rangeStart := int(float64(playList.Len()) * durationPercent[0] / 100)
 	if startIndex == 0 {
-		startIndex = int(float64(playList.Len()) * durationPercent[0] / 100)
+		startIndex = rangeStart
 	}
 	endIndex := int(float64(playList.Len()) * durationPercent[1] / 100)
+	total := endIndex - rangeStart // fragments in the selected part
 	for i, tsLink := range playList.List[startIndex:endIndex] {
 		i := i + startIndex
 		if tools.Abort {
-			fmt.Println()
 			return i, filename, fmt.Errorf("aborting")
 		}
 		startTime := time.Now()
-		err := muxDownloadLoop(&data, tsLink, header, 10, 5)
+		err := muxDownloadLoop(id, &data, tsLink, header, 10, 5)
 		if err != nil {
-			fmt.Println()
 			err = fmt.Errorf("error: %v\nFailed at %.2f%%", tools.ANSIColor(err, 2), float32(i)/float32(playList.Len())*100)
 			return i, filename, err
 		}
@@ -319,15 +316,20 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 		avgdur.Add(endDur)
 		getavgdur := avgdur.Average()
 		speedSecs := avgsize.Average() / (getavgdur * 60)
-		eta := getavgdur * ((float64(playList.Len()) * durationPercent[1] / 100) - float64(i))
-		percent := float64(i) / float64(playList.Len()) * 100
-		fmt.Printf("\n\033[A\033[2KDownloading: %s\tRemaining: %s\t%s", tools.ANSIColor(fmt.Sprintf("%.1f%%", percent), 33), tools.FormatMinutes(eta), tools.FormatBytesPerSecond(speedSecs))
+		eta := getavgdur * float64(endIndex-(i+1))
+		// percent of the selected part, so it reaches 100% even when only a
+		// part of the video is downloaded or a download was resumed
+		percent := 100.0
+		if total > 0 {
+			percent = float64(i+1-rangeStart) / float64(total) * 100
+		}
+		ui.Progress(id, percent, tools.FormatMinutes(eta), tools.FormatBytesPerSecond(speedSecs))
 	}
 	return 0, filename, nil
 }
 
-// download retry loop for Mux()
-func muxDownloadLoop(data *[]byte, url string, header map[string]string, timeout, maxRetry int) (err error) {
+// download retry loop for Mux(), id is the download's place on the dashboard
+func muxDownloadLoop(id int, data *[]byte, url string, header map[string]string, timeout, maxRetry int) (err error) {
 	retry := 0
 	for {
 		var status int
@@ -340,7 +342,7 @@ func muxDownloadLoop(data *[]byte, url string, header map[string]string, timeout
 			continue
 		}
 		if status == 410 {
-			fmt.Fprintln(os.Stderr, "\nDownload Expired")
+			ui.Note(id, "Download Expired")
 			retry = maxRetry
 		}
 		retry++
@@ -352,7 +354,7 @@ func muxDownloadLoop(data *[]byte, url string, header map[string]string, timeout
 		if retry > maxRetry {
 			return
 		}
-		fmt.Fprintf(os.Stderr, "\n\033[2A\033[2KError: %v, Retrying...\n", tools.ANSIColor(tools.ShortenString(err, 40), 2))
+		ui.Note(id, fmt.Sprintf("Retrying (%d/%d): %v", retry, maxRetry, tools.ShortenString(err, 40)))
 		time.Sleep(time.Second)
 	}
 	return
