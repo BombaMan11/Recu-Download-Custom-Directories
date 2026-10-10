@@ -4,6 +4,7 @@ import (
 	"recurbate/recu"
 	"recurbate/playlist"
 	"recurbate/tools"
+	"recurbate/ui"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ const (
 	optUnfinished = "Unfinished Directory"
 	optFinished   = "Finished Directory"
 	optPlaylist   = "Playlist Directory"
+	optASCII      = "ASCII Interface"
 )
 
 // Defines the JSON used
@@ -62,6 +64,12 @@ func (config Config) PlaylistDir() string {
 		return dir
 	}
 	return config.UnfinishedDir()
+}
+
+// true if the dashboard should only use plain ASCII characters (no box
+// drawing or block characters), for consoles that show them as "?"
+func (config Config) ASCIIMode() bool {
+	return strings.EqualFold(config.dirOption(optASCII), "true")
 }
 
 // Creates every folder set in the json so they don't have to exist beforehand
@@ -107,10 +115,10 @@ func (config Config) moveToFinished(unfinishedDir, fileName string) {
 	dst, err := tools.MoveFile(src, finishedDir)
 	if err != nil {
 		// The download itself succeeded, so it is still marked COMPLETE
-		fmt.Fprintf(os.Stderr, "Download complete, but moving the file failed: %v\nFile is at: %s\n", err, src)
+		ui.Error(fmt.Sprintf("Download complete, but moving the file failed: %v. File is at: %s", err, src))
 		return
 	}
-	fmt.Printf("Moved to: %s\n", dst)
+	ui.Logf("Moved to: %s", dst)
 }
 
 // ---------------------------------------------------------------------
@@ -119,7 +127,7 @@ func (config Config) moveToFinished(unfinishedDir, fileName string) {
 func (config Config) GetPlaylist(urlAny any, jsonLoc int) (playList playlist.Playlist) {
 	url, _, _, err, complete := parseUrl(urlAny)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "GetPlaylist: urls are in wrong format, error: %v\n", err)
+		ui.Error(fmt.Sprintf("GetPlaylist: urls are in wrong format, error: %v", err))
 	}
 	if complete {
 		return
@@ -127,13 +135,13 @@ func (config Config) GetPlaylist(urlAny any, jsonLoc int) (playList playlist.Pla
 	playList, status, err := recu.Parse(url, config.Header, jsonLoc, config.parseMaxRes())
 	switch status {
 	case "cloudflare":
-		fmt.Fprintf(os.Stderr, "%s\nCloudflare Blocked: Failed on url: %v\n", err.Error(), url)
+		ui.Error(fmt.Sprintf("Cloudflare Blocked: Failed on url: %v: %s", url, err.Error()))
 	case "cookie":
-		fmt.Fprintf(os.Stderr, "Please Log in: Failed on url: %v\n", url)
+		ui.Error(fmt.Sprintf("Please Log in: Failed on url: %v", url))
 	case "wait":
-		fmt.Fprintf(os.Stderr, "Daily View Used: Failed on url: %v\n", url)
+		ui.Error(fmt.Sprintf("Daily View Used: Failed on url: %v", url))
 	case "panic":
-		fmt.Fprintf(os.Stderr, "Error: %s\nFailed on url: %v\n", err.Error(), url)
+		ui.Error(fmt.Sprintf("Failed on url: %v: %s", url, err.Error()))
 	}
 	return
 }
@@ -152,27 +160,31 @@ func (config Config) parseMaxRes() int {
 func (config *Config) GetVideo(playList playlist.Playlist) error {
 	url, duration, startIndex, err, _ := parseUrl(config.Urls[playList.JsonLoc])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		ui.Fail(playList.JsonLoc, playList.Filename, err.Error())
 		return err
 	}
 	unfinishedDir := config.UnfinishedDir()
 	// download and mux playlist
 	lastIndex, finalName, err := recu.Mux(playList, tools.FormatedHeader(config.Header, "", 0), startIndex, duration, unfinishedDir)
-	println()
 	if err == nil {
-		modifyUrl(&config.Urls[playList.JsonLoc], "COMPLETE")
-		fmt.Printf("Completed: %v:%v\n", finalName, url)
+		ui.Finish(playList.JsonLoc, finalName, url)
 		// only a fully downloaded file ever leaves the unfinished folder
 		config.moveToFinished(unfinishedDir, finalName+".ts")
 	} else {
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintf(os.Stderr, "Download Failed at line: %v\n", lastIndex)
+		ui.Fail(playList.JsonLoc, finalName, fmt.Sprintf("%v (stopped at line %v)", err, lastIndex))
+	}
+	// update state and save to json under one lock, so several downloads
+	// finishing at the same time can't race on the url list
+	mtx.Lock()
+	if err == nil {
+		modifyUrl(&config.Urls[playList.JsonLoc], "COMPLETE")
+	} else {
 		modifyUrl(&config.Urls[playList.JsonLoc], lastIndex)
 	}
-	// save state to json
-	err2 := config.Save()
+	err2 := config.saveLocked()
+	mtx.Unlock()
 	if err2 != nil {
-		fmt.Println(err2)
+		ui.Error(err2.Error())
 	}
 	return err
 }
@@ -265,15 +277,20 @@ func Default() Config {
 		optUnfinished: "",
 		optFinished:   "",
 		optPlaylist:   "",
+		optASCII:      "",
 	}
 	return jsonTemplet
 }
 
 // Saves Json
-func (config *Config) Save() (err error) {
-	// defer so the lock is always released, even on an error return
+func (config *Config) Save() error {
 	mtx.Lock()
 	defer mtx.Unlock()
+	return config.saveLocked()
+}
+
+// Does the actual save, the caller must already hold mtx
+func (config *Config) saveLocked() (err error) {
 	var jsonData []byte
 	jsonData, err = json.MarshalIndent(config, "", "\t")
 	if err != nil {
@@ -286,7 +303,6 @@ func (config *Config) Save() (err error) {
 	err = os.WriteFile(jsonLocation, jsonData, 0666)
 	if err != nil {
 		err = fmt.Errorf("error: Saving Json:%v", err)
-		return
 	}
 	return
 }
