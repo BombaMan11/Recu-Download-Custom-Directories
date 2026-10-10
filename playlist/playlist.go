@@ -1,8 +1,8 @@
 package playlist
 
 import (
+	"recurbate/ui"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -32,8 +32,7 @@ func NewFromFilename(raw_m3u8 []byte, filename string, jsonLoc int) (playList Pl
 		}
 		appendedCheck, err := appendCheck(line)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Issue with the TS Fragmanet check parameter creator:")
-			fmt.Fprintln(os.Stderr, err)
+			ui.Error(fmt.Sprintf("Issue with the TS Fragmanet check parameter creator: %v", err))
 			list = append(list, line)
 		} else {
 			list = append(list, appendedCheck)
