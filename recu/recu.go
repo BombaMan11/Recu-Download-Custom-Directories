@@ -230,13 +230,19 @@ func regexResolutionMatch(text string) (int, error) {
 // (dir is the "Unfinished Directory", a blank dir means the working directory).
 // Progress is reported to the dashboard (ui package), nothing is printed here.
 //
+// maxFragments > 0 stops after that many fragments (used to create the file
+// and see its first seconds without downloading everything), 0 means
+// download everything.
+//
 // Returns:
 //
-//	failIndex - the playlist line it stopped at (0 when the download finished)
+//	failIndex - the playlist line it stopped at (0 when the download finished).
+//	            With maxFragments it is the line it stopped at on purpose,
+//	            err is nil then.
 //	filename  - the final file name, without folder or ".ts". This can differ
 //	            from playList.Filename if a name collision added "(1)" etc.
 //	err       - nil only if the whole download finished
-func Mux(playList playlist.Playlist, header map[string]string, startIndex int, durationPercent []float64, dir string) (failIndex int, filename string, err error) {
+func Mux(playList playlist.Playlist, header map[string]string, startIndex int, durationPercent []float64, dir string, maxFragments int) (failIndex int, filename string, err error) {
 	var data []byte
 	var file *os.File
 	var avgdur, avgsize tools.AvgBuffer
@@ -293,6 +299,10 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 		startIndex = rangeStart
 	}
 	endIndex := int(float64(playList.Len()) * durationPercent[1] / 100)
+	fullEnd := endIndex
+	if maxFragments > 0 && startIndex+maxFragments < endIndex {
+		endIndex = startIndex + maxFragments
+	}
 	total := endIndex - rangeStart // fragments in the selected part
 	for i, tsLink := range playList.List[startIndex:endIndex] {
 		i := i + startIndex
@@ -324,6 +334,9 @@ func Mux(playList playlist.Playlist, header map[string]string, startIndex int, d
 			percent = float64(i+1-rangeStart) / float64(total) * 100
 		}
 		ui.Progress(id, percent, tools.FormatMinutes(eta), tools.FormatBytesPerSecond(speedSecs))
+	}
+	if endIndex < fullEnd {
+		return endIndex, filename, nil // stopped on purpose, not finished
 	}
 	return 0, filename, nil
 }
