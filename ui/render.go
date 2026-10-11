@@ -26,13 +26,17 @@ const (
 type charset struct {
 	tl, tr, bl, br string // box corners
 	h, v           string // box lines
+	teeDown, teeUp string // where a divider meets the top / bottom line
 	filled, blank  string // progress bar
 	ellipsis       string
 	bullet         string
 }
 
-var unicodeSet = charset{"┌", "┐", "└", "┘", "─", "│", "▇", "-", "…", "-"}
-var asciiSet = charset{"+", "+", "+", "+", "-", "|", "#", "-", "~", "-"}
+var unicodeSet = charset{"┌", "┐", "└", "┘", "─", "│", "┬", "┴", "▇", "-", "…", "-"}
+var asciiSet = charset{"+", "+", "+", "+", "-", "|", "+", "+", "#", "-", "~", "-"}
+
+// color of the waiting box, also used for its middle divider
+const waitingColor = "93"
 
 // ---------------------------------------------------------------------
 // text helpers
@@ -147,7 +151,9 @@ func wrap(s string, n int) []string {
 
 // Draws a box of exactly w x h characters. Content lines must already fit
 // inside (w-4 characters), extra lines are cut off.
-func box(cs charset, title, color string, w, h int, content []string) []string {
+// split > 0 joins a divider to the top and bottom line, split characters
+// from the left edge of the content (the content draws the divider itself).
+func box(cs charset, title, color string, w, h, split int, content []string) []string {
 	iw := w - 4
 	ih := h - 2
 	lines := make([]string, 0, h)
@@ -157,8 +163,14 @@ func box(cs charset, title, color string, w, h int, content []string) []string {
 	if fill < 0 {
 		fill = 0
 	}
+	divCol := 2 + split // column of the divider, counted from the left edge
+	fillStr := strings.Repeat(cs.h, fill)
+	if tStart := 2 + runeLen(t); split > 0 && divCol >= tStart && divCol < tStart+fill {
+		idx := divCol - tStart
+		fillStr = strings.Repeat(cs.h, idx) + cs.teeDown + strings.Repeat(cs.h, fill-idx-1)
+	}
 	lines = append(lines,
-		style(color, cs.tl+cs.h)+style("1;"+color, t)+style(color, strings.Repeat(cs.h, fill)+cs.tr))
+		style(color, cs.tl+cs.h)+style("1;"+color, t)+style(color, fillStr+cs.tr))
 
 	side := style(color, cs.v)
 	for i := 0; i < ih; i++ {
@@ -169,7 +181,11 @@ func box(cs charset, title, color string, w, h int, content []string) []string {
 		lines = append(lines, side+" "+padRight(line, iw)+" "+side)
 	}
 
-	lines = append(lines, style(color, cs.bl+strings.Repeat(cs.h, w-2)+cs.br))
+	bottom := strings.Repeat(cs.h, w-2)
+	if split > 0 && divCol-1 < w-2 {
+		bottom = strings.Repeat(cs.h, divCol-1) + cs.teeUp + strings.Repeat(cs.h, w-2-(divCol-1)-1)
+	}
+	lines = append(lines, style(color, cs.bl+bottom+cs.br))
 	return lines
 }
 
@@ -261,17 +277,38 @@ func downloadingContent(snap snapshot, cs charset, iw, ih int) []string {
 	return lines
 }
 
+// width of the left column of the waiting box (the right one is the rest,
+// minus 1 character for the divider)
+func waitingSplit(iw int) int {
+	return (iw - 1) / 2
+}
+
+// Two columns with a divider: the list fills the left column from top to
+// bottom and then continues in the right column.
 func waitingContent(snap snapshot, cs charset, iw, ih int) []string {
-	var lines []string
+	lc := waitingSplit(iw)
+	rc := iw - 1 - lc
+	capacity := 2 * ih
 	names := snap.waiting
-	if len(names) > ih {
-		names = names[:ih-1]
+	moreLine := ""
+	if len(names) > capacity {
+		names = names[:capacity-1]
+		moreLine = style("90", fmt.Sprintf("+%d more", len(snap.waiting)-len(names)))
 	}
-	for _, name := range names {
-		lines = append(lines, cutName(name, iw, cs))
+	// text of the k-th slot (0..capacity-1), width is that column's width
+	cell := func(k, width int) string {
+		switch {
+		case k < len(names):
+			return cutName(names[k], width, cs)
+		case k == capacity-1 && moreLine != "":
+			return moreLine
+		}
+		return ""
 	}
-	if more := len(snap.waiting) - len(names); more > 0 {
-		lines = append(lines, style("90", fmt.Sprintf("+%d more", more)))
+	divider := style(waitingColor, cs.v)
+	lines := make([]string, ih)
+	for i := 0; i < ih; i++ {
+		lines[i] = padRight(cell(i, lc), lc) + divider + cell(ih+i, rc)
 	}
 	return lines
 }
@@ -360,13 +397,13 @@ func render(termW, termH int) string {
 	bh := gh     // errors box: same height as the waiting box
 	oh := h - bh // finished box gets the rest of the right column
 
-	downloadBox := box(cs, "Downloading ("+strconv.Itoa(len(snap.active))+")", "92", lw, rh,
+	downloadBox := box(cs, "Downloading ("+strconv.Itoa(len(snap.active))+")", "92", lw, rh, 0,
 		downloadingContent(snap, cs, lw-4, rh-2))
-	waitingBox := box(cs, "Waiting ("+strconv.Itoa(len(snap.waiting))+")", "93", lw, gh,
+	waitingBox := box(cs, "Waiting ("+strconv.Itoa(len(snap.waiting))+")", waitingColor, lw, gh, waitingSplit(lw-4),
 		waitingContent(snap, cs, lw-4, gh-2))
-	finishedBox := box(cs, "Finished ("+strconv.Itoa(len(snap.finished))+")", "97", rw, oh,
+	finishedBox := box(cs, "Finished ("+strconv.Itoa(len(snap.finished))+")", "97", rw, oh, 0,
 		finishedContent(snap, cs, rw-4, oh-2))
-	errorBox := box(cs, "Errors ("+strconv.Itoa(len(snap.errors))+")", "91", rw, bh,
+	errorBox := box(cs, "Errors ("+strconv.Itoa(len(snap.errors))+")", "91", rw, bh, 0,
 		errorContent(snap, cs, rw-4, bh-2))
 
 	var sb strings.Builder
