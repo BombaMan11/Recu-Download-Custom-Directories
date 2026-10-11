@@ -134,6 +134,29 @@ func Begin(id int, name string) {
 	}
 }
 
+// A download only ran on purpose for a moment and now waits for its turn again
+// (it goes back into the waiting list at its place)
+func Requeue(id int, name string) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(active, id)
+	delete(lastStep, id)
+	removeQueued(id)
+	pos := len(waiting)
+	for i, q := range waiting {
+		if q.id > id {
+			pos = i
+			break
+		}
+	}
+	waiting = append(waiting, queued{})
+	copy(waiting[pos+1:], waiting[pos:])
+	waiting[pos] = queued{id: id, name: name}
+	if !enabled {
+		fmt.Printf("Created: %s\n", name)
+	}
+}
+
 // Updates a download. eta and speed are already formatted text.
 func Progress(id int, percent float64, eta, speed string) {
 	mu.Lock()
