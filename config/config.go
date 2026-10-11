@@ -156,8 +156,58 @@ func (config Config) parseMaxRes() int {
 	return i
 }
 
+// number of fragments SeedVideo downloads
+const seedFragments = 2
+
+// true for a url that was never started: its last value in the json is
+// missing or 0 (and it isn't marked COMPLETE)
+func (config Config) NeedsSeed(jsonLoc int) bool {
+	_, _, startIndex, err, complete := parseUrl(config.Urls[jsonLoc])
+	return err == nil && !complete && startIndex == 0
+}
+
+// Gives every new url a first short download so its .ts file exists in the
+// unfinished folder, all at the same time. The url's value in the json
+// becomes the line it reached (so 0 becomes 2), a later GetVideo continues
+// from there. Urls that were already started or finished are left alone.
+func (config *Config) SeedAll(playlists []playlist.Playlist) {
+	var wg sync.WaitGroup
+	count := 0
+	for _, playList := range playlists {
+		if playList.IsNil() || !config.NeedsSeed(playList.JsonLoc) {
+			continue
+		}
+		count++
+		wg.Add(1)
+		go func(playList playlist.Playlist) {
+			defer wg.Done()
+			config.SeedVideo(playList)
+		}(playList)
+	}
+	if count == 0 {
+		return
+	}
+	ui.Phase(fmt.Sprintf("Creating files for %d new downloads", count))
+	wg.Wait()
+	ui.Phase("")
+}
+
+// Downloads only the first few fragments of a new url (see SeedAll)
+func (config *Config) SeedVideo(playList playlist.Playlist) error {
+	if !config.NeedsSeed(playList.JsonLoc) {
+		return nil
+	}
+	return config.download(playList, seedFragments)
+}
+
 // Saves video to the unfinished folder, then moves it to the finished folder once complete
 func (config *Config) GetVideo(playList playlist.Playlist) error {
+	return config.download(playList, 0)
+}
+
+// maxFragments > 0 only downloads that many fragments and leaves the file in
+// the unfinished folder (see SeedVideo), 0 downloads everything
+func (config *Config) download(playList playlist.Playlist, maxFragments int) error {
 	url, duration, startIndex, err, _ := parseUrl(config.Urls[playList.JsonLoc])
 	if err != nil {
 		ui.Fail(playList.JsonLoc, playList.Filename, err.Error())
@@ -165,18 +215,23 @@ func (config *Config) GetVideo(playList playlist.Playlist) error {
 	}
 	unfinishedDir := config.UnfinishedDir()
 	// download and mux playlist
-	lastIndex, finalName, err := recu.Mux(playList, tools.FormatedHeader(config.Header, "", 0), startIndex, duration, unfinishedDir)
-	if err == nil {
+	lastIndex, finalName, err := recu.Mux(playList, tools.FormatedHeader(config.Header, "", 0), startIndex, duration, unfinishedDir, maxFragments)
+	// stopped on purpose after maxFragments, lastIndex is where it stopped
+	partial := err == nil && lastIndex > 0
+	switch {
+	case err != nil:
+		ui.Fail(playList.JsonLoc, finalName, fmt.Sprintf("%v (stopped at line %v)", err, lastIndex))
+	case partial:
+		ui.Requeue(playList.JsonLoc, finalName)
+	default:
 		ui.Finish(playList.JsonLoc, finalName, url)
 		// only a fully downloaded file ever leaves the unfinished folder
 		config.moveToFinished(unfinishedDir, finalName+".ts")
-	} else {
-		ui.Fail(playList.JsonLoc, finalName, fmt.Sprintf("%v (stopped at line %v)", err, lastIndex))
 	}
 	// update state and save to json under one lock, so several downloads
 	// finishing at the same time can't race on the url list
 	mtx.Lock()
-	if err == nil {
+	if err == nil && !partial {
 		modifyUrl(&config.Urls[playList.JsonLoc], "COMPLETE")
 	} else {
 		modifyUrl(&config.Urls[playList.JsonLoc], lastIndex)
@@ -212,6 +267,18 @@ func modifyUrl(url *any, lastIndex any) {
 	}
 }
 
+// The saved line number is a float64 when it was read from the json, but an
+// int when it was set during this run
+func indexValue(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	}
+	panic(fmt.Sprintf("%v is not a number", v))
+}
+
 // Parse URL object from json
 func parseUrl(url any) (urlString string, duration []float64, startIndex int, err error, complete bool) {
 	defer func() {
@@ -235,7 +302,7 @@ func parseUrl(url any) (urlString string, duration []float64, startIndex int, er
 					complete = true
 				}
 			} else {
-				startIndex = int(t[1].(float64))
+				startIndex = indexValue(t[1])
 			}
 		case 4:
 			urlString = t[0].(string)
@@ -249,7 +316,7 @@ func parseUrl(url any) (urlString string, duration []float64, startIndex int, er
 					complete = true
 				}
 			} else {
-				startIndex = int(t[4].(float64))
+				startIndex = indexValue(t[4])
 			}
 
 		default:
