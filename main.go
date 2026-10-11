@@ -79,6 +79,7 @@ func parallelService(cfg config.Config) {
 
 func hybridService(cfg config.Config) {
 	playlists := fetchPlaylists(cfg)
+	cfg.SeedAll(playlists) // new urls get their file first
 	servers := make(map[string][]playlist.Playlist)
 	// organize playlist by server
 	for _, playList := range playlists {
@@ -132,6 +133,7 @@ func parseSeriesCount() int {
 // NEW: Downloads the list with up to `workers` files at the same time
 func serialService(cfg config.Config, workers int) {
 	playlists := fetchPlaylists(cfg)
+	cfg.SeedAll(playlists) // new urls get their file first
 	if workers > len(playlists) {
 		workers = len(playlists)
 	}
@@ -220,6 +222,11 @@ if "series" is used, the program will download all the videos
 	same time (e.g. "series 4"), default is 1
 if "hybrid is used, the program will download sequentially from
 	each server but in parallel from different servers
+"series" and "hybrid" first give every new url (last value missing or
+	0) a short download of its first fragments, all at once, so its
+	.ts file exists and shows how many files there are. The value in
+	the json becomes the line it reached (0 becomes 2). The full
+	downloads then continue from there.
 
 Dashboard: while downloading, the screen shows the active downloads,
 	the waiting ones, the finished ones and the errors. Set
